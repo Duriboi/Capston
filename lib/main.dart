@@ -828,41 +828,98 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
   final _alarmTimeController = TextEditingController();
   String _mealTime = 'MORNING';
 
+  DateTime? _startDate;
+  DateTime? _endDate;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('알람 추가')),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: EdgeInsets.all(20),
         child: Form(
           key: _formKey,
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 약 이름
               TextFormField(
                 controller: _medNameController,
                 decoration: InputDecoration(labelText: '약 이름'),
-                validator: (value) => value!.isEmpty ? '약 이름을 입력하세요' : null,
+                validator: (v) => v!.isEmpty ? '약 이름을 입력하세요' : null,
               ),
+              SizedBox(height: 12),
+
+              // 식사 시간대
               DropdownButtonFormField<String>(
                 value: _mealTime,
                 decoration: InputDecoration(labelText: '복용 시간대'),
                 items: ['MORNING', 'LUNCH', 'DINNER']
-                    .map((time) => DropdownMenuItem(value: time, child: Text(time)))
+                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
                     .toList(),
-                onChanged: (value) => setState(() => _mealTime = value!),
+                onChanged: (v) => setState(() => _mealTime = v!),
               ),
+              SizedBox(height: 12),
+
+              // 알람 시간
               TextFormField(
                 controller: _alarmTimeController,
                 decoration: InputDecoration(labelText: '알람 시간 (예: 08:00)'),
-                validator: (value) => value!.isEmpty ? '시간을 입력하세요' : null,
+                validator: (v) => v!.isEmpty ? '시간을 입력하세요' : null,
+              ),
+              SizedBox(height: 16),
+
+              // 복용 시작일 선택
+              TextButton(
+                onPressed: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _startDate ?? DateTime.now(),
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(2030),
+                  );
+                  if (picked != null) setState(() => _startDate = picked);
+                },
+                child: Text(
+                  _startDate == null
+                      ? '📅 복용 시작일 선택'
+                      : '시작일: ${DateFormat('yyyy-MM-dd').format(_startDate!)}',
+                ),
+              ),
+
+              // 복용 종료일 선택
+              TextButton(
+                onPressed: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _endDate ?? (_startDate ?? DateTime.now()),
+                    firstDate: _startDate ?? DateTime(2020),
+                    lastDate: DateTime(2030),
+                  );
+                  if (picked != null) setState(() => _endDate = picked);
+                },
+                child: Text(
+                  _endDate == null
+                      ? '📅 복용 종료일 선택 (선택사항)'
+                      : '종료일: ${DateFormat('yyyy-MM-dd').format(_endDate!)}',
+                ),
               ),
               SizedBox(height: 20),
-              ElevatedButton(
-                onPressed: () async {
-                  if (_formKey.currentState!.validate()) {
+
+              // 저장 버튼
+              Center(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    if (!_formKey.currentState!.validate()) return;
+                    if (_startDate == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('시작일을 선택해주세요.')),
+                      );
+                      return;
+                    }
+
                     final dbHelper = DatabaseHelper();
                     final medName = _medNameController.text.trim();
-
                     await _insertMedicationIfNeeded(dbHelper, medName);
 
                     await dbHelper.database.then((db) {
@@ -871,15 +928,17 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
                         'MED_NAME': medName,
                         'MEAL_TIME': _mealTime,
                         'ALARM_TIME': _alarmTimeController.text.trim(),
-                        'START_DATE': DateTime.now().toIso8601String().split('T')[0],
-                        'END_DATE': null,
+                        'START_DATE': DateFormat('yyyy-MM-dd').format(_startDate!),
+                        'END_DATE': _endDate != null
+                            ? DateFormat('yyyy-MM-dd').format(_endDate!)
+                            : null,
                       });
                     });
 
                     Navigator.pop(context, true);
-                  }
-                },
-                child: Text('저장'),
+                  },
+                  child: Text('저장'),
+                ),
               ),
             ],
           ),
@@ -888,15 +947,22 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
     );
   }
 
-  Future<void> _insertMedicationIfNeeded(DatabaseHelper dbHelper, String medName) async {
+  Future<void> _insertMedicationIfNeeded(
+      DatabaseHelper dbHelper, String medName) async {
     final db = await dbHelper.database;
-    final existing = await db.query('medications', where: 'med_name = ?', whereArgs: [medName]);
+    final existing = await db.query(
+      'medications',
+      where: 'med_name = ?',
+      whereArgs: [medName],
+    );
     if (existing.isEmpty) {
-      await db.insert('medications', {'med_name': medName, 'description': ''});
+      await db.insert('medications', {
+        'med_name': medName,
+        'description': '',
+      });
     }
   }
 }
-
 
 class CalendarPage extends StatefulWidget {
   final String userEmail;
@@ -906,8 +972,37 @@ class CalendarPage extends StatefulWidget {
 }
 
 class _CalendarPageState extends State<CalendarPage> {
-  DateTime focusedDay = DateTime.now();
-  DateTime? selectedDay;
+  DateTime _focusedDay = DateTime.now();
+  DateTime? _selectedDay;
+  late Future<List<Map<String, dynamic>>> _dayAlarms;
+
+  @override
+  void initState() {
+    super.initState();
+    // 초기화할 때 오늘 날짜에 맞춰 로드
+    _loadAlarmsForDate(_focusedDay);
+  }
+
+  void _onDaySelected(DateTime selected, DateTime focused) {
+    setState(() {
+      _selectedDay = selected;
+      _focusedDay = focused;
+      _loadAlarmsForDate(selected);
+    });
+  }
+
+  void _loadAlarmsForDate(DateTime day) {
+    final dateStr = DateFormat('yyyy-MM-dd').format(day);
+    _dayAlarms = DatabaseHelper().database.then((db) {
+      return db.rawQuery('''
+        SELECT * FROM MEDICATION_ALARMS
+        WHERE EMAIL = ?
+          AND START_DATE <= ?
+          AND (END_DATE IS NULL OR END_DATE >= ?)
+        ORDER BY ALARM_TIME ASC
+      ''', [widget.userEmail, dateStr, dateStr]);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -915,71 +1010,62 @@ class _CalendarPageState extends State<CalendarPage> {
       backgroundColor: Color(0xFFF8F8F8),
       body: Column(
         children: [
-          Container(
-            color: Color(0xFFFDFEFE),
-            padding: EdgeInsets.only(top: 35, bottom: 0, left: 20, right: 20),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  '복약 달력',
-                  style: TextStyle(
-                    fontSize: 20, color: Colors.black, fontWeight: FontWeight.bold,),
-                ),
-              ],
+          // -- 달력 위젯 --
+          TableCalendar(
+            firstDay: DateTime(2020),
+            lastDay: DateTime(2030),
+            focusedDay: _focusedDay,
+            selectedDayPredicate: (d) => isSameDay(d, _selectedDay),
+            onDaySelected: _onDaySelected,
+            headerStyle: HeaderStyle(formatButtonVisible: false, titleCentered: true),
+            calendarStyle: CalendarStyle(
+              selectedDecoration: BoxDecoration(color: Colors.teal, shape: BoxShape.circle),
+              todayDecoration: BoxDecoration(color: Colors.teal.withOpacity(0.3), shape: BoxShape.circle),
             ),
           ),
-          Container(
-            decoration: BoxDecoration(
-              color: Color(0xFFFDFEFE),
-              borderRadius: BorderRadius.vertical(bottom: Radius.circular(30)),
-            ),
-            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 0),
-            child: TableCalendar(
-              firstDay: DateTime(2020),
-              lastDay: DateTime(2030),
-              focusedDay: focusedDay,
-              selectedDayPredicate: (day) => isSameDay(selectedDay, day),
-              onDaySelected: (selected, focused) {
-                setState(() {
-                  selectedDay = selected;
-                  focusedDay = focused;
-                });
-              },
-              calendarStyle: CalendarStyle(
-                selectedDecoration: BoxDecoration(
-                  color: Colors.teal,
-                  shape: BoxShape.circle,
-                ),
-                todayDecoration: BoxDecoration(
-                  color: Colors.teal.withOpacity(0.3),
-                  shape: BoxShape.circle,
-                ),
-              ),
-              headerStyle: HeaderStyle(
-                formatButtonVisible: false,
-                titleCentered: true,
-              ),
-              calendarFormat: CalendarFormat.month,
-            ),
-          ),
+
+          // -- 해당 날짜 알람 리스트 --
           Expanded(
-            child: Container(
-              width: double.infinity,
-              color: Color(0xFFF8F8F8),
-              padding: EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${DateFormat('yyyy.MM.dd').format(selectedDay ?? focusedDay)} 복약정보',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 10),
-                  ListTile(title: Text('오전: 종합비타민')),
-                  ListTile(title: Text('저녁: 위장약')),
-                ],
-              ),
+            child: FutureBuilder<List<Map<String, dynamic>>>(
+              future: _dayAlarms,
+              builder: (context, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return Center(child: CircularProgressIndicator());
+                }
+                final alarms = snap.data ?? [];
+                if (alarms.isEmpty) {
+                  return Center(child: Text('이 날짜에 등록된 알림이 없습니다.'));
+                }
+
+                // 아침/점심/저녁별 Section
+                return ListView(
+                  padding: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                  children: [
+                    Text(
+                      '${DateFormat('yyyy.MM.dd').format(_selectedDay ?? _focusedDay)} 복약 정보',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    ...['MORNING', 'LUNCH', 'DINNER'].expand((meal) {
+                      final section = alarms.where((a) => a['MEAL_TIME'] == meal);
+                      if (section.isEmpty) return [];
+                      final header = {
+                        'MORNING': '🌅 아침',
+                        'LUNCH':   '🌞 점심',
+                        'DINNER':  '🌙 저녁',
+                      }[meal]!;
+                      return [
+                        SizedBox(height: 12),
+                        Text(header, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                        ...section.map((a) => ListTile(
+                          leading: Icon(Icons.medication_liquid, color: Colors.teal),
+                          title: Text(a['MED_NAME']),
+                          subtitle: Text('시간: ${a['ALARM_TIME']}'),
+                        )),
+                      ];
+                    }),
+                  ],
+                );
+              },
             ),
           ),
         ],
@@ -987,6 +1073,7 @@ class _CalendarPageState extends State<CalendarPage> {
     );
   }
 }
+
 
 class PillPage extends StatefulWidget {
   // StatelessWidget -> StatefulWidget 변경
