@@ -3,6 +3,10 @@ import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'database_helper.dart';
 import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
+import 'dart:io';
+import 'dart:convert';
+import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart'; // 권한 요청
 // Flutter Local Notifications 플러그인 인스턴스 생성
@@ -130,12 +134,12 @@ Future<void> main() async {
   await _initializeNotifications();
 
   // --- Android Alarm Manager 초기화 ---
-    try {
-      await AndroidAlarmManager.initialize();
-      print("Android Alarm Manager initialized.");
-    } catch (e) {
-      print("Error initializing Android Alarm Manager: $e");
-    }
+  try {
+    await AndroidAlarmManager.initialize();
+    print("Android Alarm Manager initialized.");
+  } catch (e) {
+    print("Error initializing Android Alarm Manager: $e");
+  }
 
   // --- 권한 요청 ---
   await _requestPermissions(); // 앱 시작 시 권한 요청
@@ -145,17 +149,17 @@ Future<void> main() async {
 
 // 권한 요청 함수
 Future<void> _requestPermissions() async {
-    PermissionStatus notificationStatus = await Permission.notification.request(); // 요청하고 상태 받기
-    print("알림 권한 상태: $notificationStatus");
+  PermissionStatus notificationStatus = await Permission.notification.request(); // 요청하고 상태 받기
+  print("알림 권한 상태: $notificationStatus");
 
-    // 정확한 알람 권한 확인
-    PermissionStatus exactAlarmStatus = await Permission.scheduleExactAlarm.status;
-    print("정확한 알람 권한 상태 (초기): $exactAlarmStatus");
-    if (exactAlarmStatus.isDenied) { // isDenied 또는 isPermanentlyDenied 등
-      print("정확한 알람 권한이 필요합니다. 앱 설정에서 '알람 및 리마인더'를 허용해주세요.");
-      // 여기서 바로 설정 열기를 유도할 수도 있음
-      // await openAppSettings();
-    }
+  // 정확한 알람 권한 확인
+  PermissionStatus exactAlarmStatus = await Permission.scheduleExactAlarm.status;
+  print("정확한 알람 권한 상태 (초기): $exactAlarmStatus");
+  if (exactAlarmStatus.isDenied) { // isDenied 또는 isPermanentlyDenied 등
+    print("정확한 알람 권한이 필요합니다. 앱 설정에서 '알람 및 리마인더'를 허용해주세요.");
+    // 여기서 바로 설정 열기를 유도할 수도 있음
+    // await openAppSettings();
+  }
   // Windows 권한은 일반적으로 필요 없음
 }
 
@@ -402,8 +406,8 @@ class EmailLoginPage extends StatelessWidget {
                         MaterialPageRoute(
                           builder:
                               (_) => HomeScreen(
-                                userEmail: member['email'] as String,
-                              ),
+                            userEmail: member['email'] as String,
+                          ),
                         ),
                       );
                     } else {
@@ -631,7 +635,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class MainPage extends StatefulWidget {
   final String userEmail;
-
   MainPage({Key? key, required this.userEmail}) : super(key: key);
 
   @override
@@ -641,7 +644,6 @@ class MainPage extends StatefulWidget {
 class _MainPageState extends State<MainPage> {
   List<Map<String, dynamic>> _alarms = [];
   bool _isLoading = true;
-
   final List<String> days = ['월', '화', '수', '목', '금', '토', '일'];
 
   @override
@@ -656,6 +658,73 @@ class _MainPageState extends State<MainPage> {
       _alarms = alarms;
       _isLoading = false;
     });
+  }
+
+  Future<void> _handleImageSelection(ImageSource source) async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: source);
+    if (pickedFile == null) return;
+
+    File imageFile = File(pickedFile.path);
+    await _uploadImageToServer(imageFile);
+  }
+
+  Future<void> _uploadImageToServer(File imageFile) async {
+    final uri = Uri.parse("http://<YOUR_FLASK_SERVER_IP>:5000/analyze_prescription");
+    final request = http.MultipartRequest('POST', uri)
+      ..files.add(await http.MultipartFile.fromPath('image', imageFile.path));
+
+    try {
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        final respStr = await response.stream.bytesToString();
+        final decoded = jsonDecode(respStr);
+        final gptText = decoded['result'] as String;
+        final meds = _parseGptResponse(gptText);
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AddAlarmPage(
+              userEmail: widget.userEmail,
+              extractedMedicines: meds,
+            ),
+          ),
+        );
+      } else {
+        _showError("서버 오류: ${response.statusCode}");
+      }
+    } catch (e) {
+      _showError("서버 통신 실패: $e");
+    }
+  }
+
+  List<Map<String, String>> _parseGptResponse(String text) {
+    final lines = text.split('\n');
+    return lines.where((line) => line.trim().isNotEmpty).map((line) {
+      final parts = line.split(RegExp(r'[-–]'));
+      if (parts.length >= 2) {
+        return {
+          'name': parts[0].replaceAll(RegExp(r'^\d+\.?\s*'), '').trim(),
+          'description': parts[1].trim(),
+        };
+      } else {
+        return {'name': line.trim(), 'description': ''};
+      }
+    }).toList();
+  }
+
+  void _showError(String message) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text("에러"),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text("확인"))
+        ],
+      ),
+    );
   }
 
   List<Widget> _buildMealSection(String mealTime, String title) {
@@ -702,63 +771,15 @@ class _MainPageState extends State<MainPage> {
                   children: [
                     Expanded(
                       child: GestureDetector(
-                        onTap: () {},
-                        child: Container(
-                          height: 170,
-                          decoration: BoxDecoration(
-                            color: Colors.teal,
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.grey,
-                                spreadRadius: 1,
-                                blurRadius: 6,
-                                offset: Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.camera_alt, size: 50, color: Colors.white),
-                              SizedBox(height: 8),
-                              Text('처방전 촬영',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  )),
-                            ],
-                          ),
-                        ),
+                        onTap: () => _handleImageSelection(ImageSource.camera),
+                        child: _buildActionBox(Icons.camera_alt, "처방전 촬영", Colors.teal),
                       ),
                     ),
                     SizedBox(width: 20),
                     Expanded(
                       child: GestureDetector(
-                        onTap: () {},
-                        child: Container(
-                          height: 170,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.grey,
-                                spreadRadius: 1,
-                                blurRadius: 6,
-                                offset: Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.upload_file, size: 50, color: Colors.teal),
-                              SizedBox(height: 8),
-                              Text('처방전 업로드', style: TextStyle(fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        ),
+                        onTap: () => _handleImageSelection(ImageSource.gallery),
+                        child: _buildActionBox(Icons.upload_file, "처방전 업로드", Colors.white),
                       ),
                     ),
                   ],
@@ -781,42 +802,77 @@ class _MainPageState extends State<MainPage> {
           ),
           Expanded(
             child: Container(
-            color: Color(0xFFF8F8F8),
-            width: double.infinity,
-            padding: EdgeInsets.all(20),
-            child: _isLoading
-                ? Center(child: CircularProgressIndicator())
-                    : Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-            Text('오늘의 복약 정보',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            SizedBox(height: 10),
-            Expanded(
-            child: SingleChildScrollView(
-            child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-            ..._buildMealSection('MORNING', '🌅 아침'),
-            ..._buildMealSection('LUNCH', '🌞 점심'),
-            ..._buildMealSection('DINNER', '🌙 저녁'),
+              color: Color(0xFFF8F8F8),
+              width: double.infinity,
+              padding: EdgeInsets.all(20),
+              child: _isLoading
+                  ? Center(child: CircularProgressIndicator())
+                  : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('오늘의 복약 정보',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  SizedBox(height: 10),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ..._buildMealSection('MORNING', '🌅 아침'),
+                          ..._buildMealSection('LUNCH', '🌞 점심'),
+                          ..._buildMealSection('DINNER', '🌙 저녁'),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
           ),
         ],
       ),
-    ),
-    ),
-      ],
+    );
+  }
+
+  Widget _buildActionBox(IconData icon, String label, Color bgColor) {
+    return Container(
+      height: 170,
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey,
+            spreadRadius: 1,
+            blurRadius: 6,
+            offset: Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 50, color: bgColor == Colors.white ? Colors.teal : Colors.white),
+          SizedBox(height: 8),
+          Text(label,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: bgColor == Colors.white ? Colors.black : Colors.white,
+              )),
+        ],
       ),
     );
   }
 }
 
+
+
+
 class AddAlarmPage extends StatefulWidget {
   final String userEmail;
-  AddAlarmPage({required this.userEmail});
+  final List<Map<String, String>>? extractedMedicines;
+
+  AddAlarmPage({required this.userEmail, this.extractedMedicines});
 
   @override
   _AddAlarmPageState createState() => _AddAlarmPageState();
@@ -824,12 +880,35 @@ class AddAlarmPage extends StatefulWidget {
 
 class _AddAlarmPageState extends State<AddAlarmPage> {
   final _formKey = GlobalKey<FormState>();
-  final _medNameController = TextEditingController();
-  final _alarmTimeController = TextEditingController();
-  String _mealTime = 'MORNING';
 
+  List<TextEditingController> _nameControllers = [];
+  List<TextEditingController> _timeControllers = [];
+  List<String> _mealTimes = [];
   DateTime? _startDate;
   DateTime? _endDate;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.extractedMedicines != null && widget.extractedMedicines!.isNotEmpty) {
+      for (var med in widget.extractedMedicines!) {
+        _nameControllers.add(TextEditingController(text: med['name']));
+        _timeControllers.add(TextEditingController());
+        _mealTimes.add('MORNING');
+      }
+    } else {
+      _nameControllers.add(TextEditingController());
+      _timeControllers.add(TextEditingController());
+      _mealTimes.add('MORNING');
+    }
+  }
+
+  @override
+  void dispose() {
+    for (var c in _nameControllers) c.dispose();
+    for (var c in _timeControllers) c.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -840,36 +919,37 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
         child: Form(
           key: _formKey,
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 약 이름
-              TextFormField(
-                controller: _medNameController,
-                decoration: InputDecoration(labelText: '약 이름'),
-                validator: (v) => v!.isEmpty ? '약 이름을 입력하세요' : null,
-              ),
-              SizedBox(height: 12),
-
-              // 식사 시간대
-              DropdownButtonFormField<String>(
-                value: _mealTime,
-                decoration: InputDecoration(labelText: '복용 시간대'),
-                items: ['MORNING', 'LUNCH', 'DINNER']
-                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
-                    .toList(),
-                onChanged: (v) => setState(() => _mealTime = v!),
-              ),
-              SizedBox(height: 12),
-
-              // 알람 시간
-              TextFormField(
-                controller: _alarmTimeController,
-                decoration: InputDecoration(labelText: '알람 시간 (예: 08:00)'),
-                validator: (v) => v!.isEmpty ? '시간을 입력하세요' : null,
-              ),
-              SizedBox(height: 16),
-
-              // 복용 시작일 선택
+              ...List.generate(_nameControllers.length, (index) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: _nameControllers[index],
+                      decoration: InputDecoration(labelText: '약 이름'),
+                      validator: (v) => v!.isEmpty ? '약 이름을 입력하세요' : null,
+                    ),
+                    SizedBox(height: 8),
+                    DropdownButtonFormField<String>(
+                      value: _mealTimes[index],
+                      decoration: InputDecoration(labelText: '복용 시간대'),
+                      items: ['MORNING', 'LUNCH', 'DINNER']
+                          .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                          .toList(),
+                      onChanged: (v) => setState(() => _mealTimes[index] = v!),
+                    ),
+                    SizedBox(height: 8),
+                    TextFormField(
+                      controller: _timeControllers[index],
+                      decoration: InputDecoration(labelText: '알람 시간 (예: 08:00)'),
+                      validator: (v) => v!.isEmpty ? '시간을 입력하세요' : null,
+                    ),
+                    Divider(thickness: 1),
+                  ],
+                );
+              }),
+              SizedBox(height: 10),
+              // 시작일
               TextButton(
                 onPressed: () async {
                   final picked = await showDatePicker(
@@ -886,8 +966,7 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
                       : '시작일: ${DateFormat('yyyy-MM-dd').format(_startDate!)}',
                 ),
               ),
-
-              // 복용 종료일 선택
+              // 종료일
               TextButton(
                 onPressed: () async {
                   final picked = await showDatePicker(
@@ -905,40 +984,42 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
                 ),
               ),
               SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: () async {
+                  if (!_formKey.currentState!.validate()) return;
+                  if (_startDate == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('시작일을 선택해주세요.')),
+                    );
+                    return;
+                  }
 
-              // 저장 버튼
-              Center(
-                child: ElevatedButton(
-                  onPressed: () async {
-                    if (!_formKey.currentState!.validate()) return;
-                    if (_startDate == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('시작일을 선택해주세요.')),
-                      );
-                      return;
-                    }
+                  final dbHelper = DatabaseHelper();
 
-                    final dbHelper = DatabaseHelper();
-                    final medName = _medNameController.text.trim();
+                  for (int i = 0; i < _nameControllers.length; i++) {
+                    final medName = _nameControllers[i].text.trim();
+                    final alarmTime = _timeControllers[i].text.trim();
+                    final mealTime = _mealTimes[i];
+
                     await _insertMedicationIfNeeded(dbHelper, medName);
 
                     await dbHelper.database.then((db) {
                       db.insert('MEDICATION_ALARMS', {
                         'EMAIL': widget.userEmail,
                         'MED_NAME': medName,
-                        'MEAL_TIME': _mealTime,
-                        'ALARM_TIME': _alarmTimeController.text.trim(),
+                        'MEAL_TIME': mealTime,
+                        'ALARM_TIME': alarmTime,
                         'START_DATE': DateFormat('yyyy-MM-dd').format(_startDate!),
                         'END_DATE': _endDate != null
                             ? DateFormat('yyyy-MM-dd').format(_endDate!)
                             : null,
                       });
                     });
+                  }
 
-                    Navigator.pop(context, true);
-                  },
-                  child: Text('저장'),
-                ),
+                  Navigator.pop(context, true);
+                },
+                child: Text('저장'),
               ),
             ],
           ),
@@ -963,6 +1044,7 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
     }
   }
 }
+
 
 class CalendarPage extends StatefulWidget {
   final String userEmail;
@@ -1104,16 +1186,16 @@ class _PillPageState extends State<PillPage> {
 
   // 알람 취소 함수 (예시)
   Future<void> cancelAlarm(int alarmId) async {
-      try {
-        final result = await AndroidAlarmManager.cancel(alarmId);
-        if (result) {
-          print("알람 취소 성공: ID=$alarmId");
-        } else {
-          print("알람 취소 실패: ID=$alarmId (이미 취소되었거나 존재하지 않음)");
-        }
-      } catch (e) {
-        print("알람 취소 중 오류: $e");
+    try {
+      final result = await AndroidAlarmManager.cancel(alarmId);
+      if (result) {
+        print("알람 취소 성공: ID=$alarmId");
+      } else {
+        print("알람 취소 실패: ID=$alarmId (이미 취소되었거나 존재하지 않음)");
       }
+    } catch (e) {
+      print("알람 취소 중 오류: $e");
+    }
   }
 
   @override
@@ -1171,23 +1253,23 @@ class _PillPageState extends State<PillPage> {
                         ],
                         // alarms 리스트를 DataRow 리스트로 변환
                         rows:
-                            alarms
-                                .map(
-                                  (alarm) => DataRow(
-                                    cells: [
-                                      DataCell(
-                                        Text(alarm['MED_NAME'] ?? 'N/A'),
-                                      ), // null 체크
-                                      DataCell(
-                                        Text(alarm['MEAL_TIME'] ?? 'N/A'),
-                                      ),
-                                      DataCell(
-                                        Text(alarm['ALARM_TIME'] ?? 'N/A'),
-                                      ),
-                                    ],
-                                  ),
-                                )
-                                .toList(),
+                        alarms
+                            .map(
+                              (alarm) => DataRow(
+                            cells: [
+                              DataCell(
+                                Text(alarm['MED_NAME'] ?? 'N/A'),
+                              ), // null 체크
+                              DataCell(
+                                Text(alarm['MEAL_TIME'] ?? 'N/A'),
+                              ),
+                              DataCell(
+                                Text(alarm['ALARM_TIME'] ?? 'N/A'),
+                              ),
+                            ],
+                          ),
+                        )
+                            .toList(),
                       ),
                     ),
                   );
@@ -1328,7 +1410,7 @@ class _MyPageState extends State<MyPage> {
                           MaterialPageRoute(
                             builder: (context) => LoginScreen(),
                           ),
-                          (Route<dynamic> route) => false, // 모든 이전 라우트 제거
+                              (Route<dynamic> route) => false, // 모든 이전 라우트 제거
                         );
                       },
                       child: Text(
