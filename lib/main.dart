@@ -552,21 +552,26 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  final GlobalKey<_MainPageState> mainPageKey = GlobalKey<_MainPageState>();
+  final GlobalKey<_CalendarPageState> calendarPageKey = GlobalKey<_CalendarPageState>();
+  final GlobalKey<_PillPageState> pillPageKey = GlobalKey<_PillPageState>();
+
   int _selectedIndex = 0;
-  late final List<Widget> _pages;
+
+  // 수정: late final -> getter로 변경 (매번 새로 생성)
+  List<Widget> get _pages => [
+    MainPage(key: mainPageKey, userEmail: widget.userEmail),
+    CalendarPage(key: calendarPageKey, userEmail: widget.userEmail),
+    PillPage(key: pillPageKey, userEmail: widget.userEmail),
+    MyPage(userEmail: widget.userEmail),
+  ];
 
   @override
   void initState() {
     super.initState();
-    // initState에서 widget.userEmail을 사용하여 페이지 목록 초기화
-    _pages = [
-      MainPage(userEmail: widget.userEmail),
-      CalendarPage(userEmail: widget.userEmail),
-      PillPage(userEmail: widget.userEmail), // userEmail 전달
-      MyPage(userEmail: widget.userEmail), // userEmail 전달
-    ];
     _scheduleAlarmsAfterPermissionCheck(); // 임시로 알람 호출
   }
+
 
   Future<void> _scheduleAlarmsAfterPermissionCheck() async {
     bool exactAlarmGranted = await Permission.scheduleExactAlarm.isGranted;
@@ -598,7 +603,21 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _selectedIndex = index;
     });
+
+    switch (index) {
+      case 0:
+        mainPageKey.currentState?.refresh();
+        break;
+      case 1:
+        calendarPageKey.currentState?.refresh();
+        break;
+      case 2:
+        pillPageKey.currentState?.refresh();
+        break;
+    }
   }
+
+
 
   @override
   Widget build(BuildContext context) {
@@ -645,11 +664,13 @@ class _MainPageState extends State<MainPage> {
   List<Map<String, dynamic>> _alarms = [];
   bool _isLoading = true;
   final List<String> days = ['월', '화', '수', '목', '금', '토', '일'];
-
-  @override
-  void initState() {
-    super.initState();
+  void refresh() {
     _loadAlarms();
+  }
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _loadAlarms(); // 탭 바뀔 때마다 자동 새로고침
   }
 
   Future<void> _loadAlarms() async {
@@ -705,21 +726,27 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
-
   List<Map<String, String>> _parseGptResponse(String text) {
     final lines = text.split('\n');
     return lines.where((line) => line.trim().isNotEmpty).map((line) {
-      final parts = line.split(RegExp(r'[-–]'));
+      String cleanLine = line.trim();
+
+      // 앞에 붙은 '1. ', '2. ', ... 제거
+      cleanLine = cleanLine.replaceFirst(RegExp(r'^\d+\.\s*'), '');
+
+      // 이름과 설명을 ':'로 처음 한 번만 나누기
+      final parts = cleanLine.split(':');
       if (parts.length >= 2) {
-        return {
-          'name': parts[0].replaceAll(RegExp(r'^\d+\.?\s*'), '').trim(),
-          'description': parts[1].trim(),
-        };
+        final name = parts[0].trim();
+        final description = parts.sublist(1).join(':').trim(); // 설명 전체 유지
+        return {'name': name, 'description': description};
       } else {
-        return {'name': line.trim(), 'description': ''};
+        return {'name': cleanLine, 'description': ''};
       }
     }).toList();
   }
+
+
 
   void _showError(String message) {
     showDialog(
@@ -1010,19 +1037,23 @@ class _AddAlarmPageState extends State<AddAlarmPage> {
 
                     await _insertMedicationIfNeeded(dbHelper, medName);
 
-                    await dbHelper.database.then((db) {
-                      db.insert('MEDICATION_ALARMS', {
-                        'EMAIL': widget.userEmail,
-                        'MED_NAME': medName,
-                        'MEAL_TIME': mealTime,
-                        'ALARM_TIME': alarmTime,
-                        'START_DATE': DateFormat('yyyy-MM-dd').format(_startDate!),
-                        'END_DATE': _endDate != null
-                            ? DateFormat('yyyy-MM-dd').format(_endDate!)
-                            : null,
-                      });
+                    final db = await dbHelper.database;
+
+                    int alarmId = await db.insert('MEDICATION_ALARMS', {
+                      'EMAIL': widget.userEmail,
+                      'MED_NAME': medName,
+                      'MEAL_TIME': mealTime,
+                      'ALARM_TIME': alarmTime,
+                      'START_DATE': DateFormat('yyyy-MM-dd').format(_startDate!),
+                      'END_DATE': _endDate != null
+                          ? DateFormat('yyyy-MM-dd').format(_endDate!)
+                          : null,
                     });
+
+                    // ✅ 알람 등록 후 스케줄링 바로 실행
+                    await scheduleAlarm(alarmId, alarmTime, medName, mealTime);
                   }
+
 
                   Navigator.pop(context, true);
                 },
@@ -1061,16 +1092,19 @@ class CalendarPage extends StatefulWidget {
 }
 
 class _CalendarPageState extends State<CalendarPage> {
+  void refresh() {
+    _loadAlarmsForDate(_focusedDay);
+  }
   DateTime _focusedDay = DateTime.now();
   DateTime? _selectedDay;
   late Future<List<Map<String, dynamic>>> _dayAlarms;
 
   @override
-  void initState() {
-    super.initState();
-    // 초기화할 때 오늘 날짜에 맞춰 로드
-    _loadAlarmsForDate(_focusedDay);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _loadAlarmsForDate(_focusedDay); // 탭 바뀔 때마다 현재 날짜 새로고침
   }
+
 
   void _onDaySelected(DateTime selected, DateTime focused) {
     setState(() {
@@ -1082,14 +1116,16 @@ class _CalendarPageState extends State<CalendarPage> {
 
   void _loadAlarmsForDate(DateTime day) {
     final dateStr = DateFormat('yyyy-MM-dd').format(day);
-    _dayAlarms = DatabaseHelper().database.then((db) {
-      return db.rawQuery('''
+    setState(() {
+      _dayAlarms = DatabaseHelper().database.then((db) {
+        return db.rawQuery('''
         SELECT * FROM MEDICATION_ALARMS
         WHERE EMAIL = ?
           AND START_DATE <= ?
           AND (END_DATE IS NULL OR END_DATE >= ?)
         ORDER BY ALARM_TIME ASC
       ''', [widget.userEmail, dateStr, dateStr]);
+      });
     });
   }
 
@@ -1174,14 +1210,18 @@ class PillPage extends StatefulWidget {
 
 class _PillPageState extends State<PillPage> {
   // State 클래스 생성
+  void refresh() {
+    _loadAlarms();
+  }
   final dbHelper = DatabaseHelper();
   late Future<List<Map<String, dynamic>>> _alarmsFuture; // Future 상태 변수
 
   @override
-  void initState() {
-    super.initState();
-    _loadAlarms(); // 초기 데이터 로드
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _loadAlarms(); // 탭 바뀔 때마다 자동 새로고침
   }
+
 
   // 알람 데이터를 로드하는 함수
   void _loadAlarms() {
@@ -1192,6 +1232,9 @@ class _PillPageState extends State<PillPage> {
   }
 
   // 알람 취소 함수 (예시)
+
+
+
   Future<void> cancelAlarm(int alarmId) async {
     try {
       final result = await AndroidAlarmManager.cancel(alarmId);
@@ -1255,28 +1298,39 @@ class _PillPageState extends State<PillPage> {
                       child: DataTable(
                         columns: const [
                           DataColumn(label: Text('약 이름')),
-                          DataColumn(label: Text('식사 시간')), // 컬럼 변경
-                          DataColumn(label: Text('알람 시간')), // 컬럼 변경
+                          DataColumn(label: Text('식사 시간')),
+                          DataColumn(label: Text('알람 시간')),
                         ],
-                        // alarms 리스트를 DataRow 리스트로 변환
-                        rows:
-                        alarms
-                            .map(
-                              (alarm) => DataRow(
+                        rows: alarms.map((alarm) {
+                          return DataRow(
                             cells: [
                               DataCell(
-                                Text(alarm['MED_NAME'] ?? 'N/A'),
-                              ), // null 체크
-                              DataCell(
-                                Text(alarm['MEAL_TIME'] ?? 'N/A'),
+                                Container(
+                                  width: 100, // ✅ 너비 고정
+                                  child: Text(
+                                    alarm['MED_NAME'] ?? 'N/A',
+                                    overflow: TextOverflow.ellipsis,
+                                    maxLines: 2,
+                                    softWrap: true,
+                                    style: TextStyle(fontSize: 14),
+                                  ),
+                                ),
                               ),
                               DataCell(
-                                Text(alarm['ALARM_TIME'] ?? 'N/A'),
+                                Text(
+                                  alarm['MEAL_TIME'] ?? 'N/A',
+                                  style: TextStyle(fontSize: 14),
+                                ),
+                              ),
+                              DataCell(
+                                Text(
+                                  alarm['ALARM_TIME'] ?? 'N/A',
+                                  style: TextStyle(fontSize: 14),
+                                ),
                               ),
                             ],
-                          ),
-                        )
-                            .toList(),
+                          );
+                        }).toList(),
                       ),
                     ),
                   );
