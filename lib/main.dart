@@ -670,7 +670,7 @@ class _MainPageState extends State<MainPage> {
   }
 
   Future<void> _uploadImageToServer(File imageFile) async {
-    final uri = Uri.parse("http://<YOUR_FLASK_SERVER_IP>:5000/analyze_prescription");
+    final uri = Uri.parse("http://192.168.0.9:5000/analyze_prescription");
     final request = http.MultipartRequest('POST', uri)
       ..files.add(await http.MultipartFile.fromPath('image', imageFile.path));
 
@@ -682,7 +682,8 @@ class _MainPageState extends State<MainPage> {
         final gptText = decoded['result'] as String;
         final meds = _parseGptResponse(gptText);
 
-        Navigator.push(
+        // ✅ 수정: AddAlarmPage에서 돌아온 뒤 결과 확인
+        final result = await Navigator.push(
           context,
           MaterialPageRoute(
             builder: (_) => AddAlarmPage(
@@ -691,6 +692,11 @@ class _MainPageState extends State<MainPage> {
             ),
           ),
         );
+
+        if (result == true) {
+          await _loadAlarms();  // 🔄 알람 목록 새로고침
+        }
+
       } else {
         _showError("서버 오류: ${response.statusCode}");
       }
@@ -698,6 +704,7 @@ class _MainPageState extends State<MainPage> {
       _showError("서버 통신 실패: $e");
     }
   }
+
 
   List<Map<String, String>> _parseGptResponse(String text) {
     final lines = text.split('\n');

@@ -21,6 +21,7 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:requestLegacyExternalStorage="true"> <!-- Android 10 파일 접근 호환 -->
+        android:usesCleartextTraffic="true"
 
         <!-- FileProvider (image_picker 용도) -->
         <provider
