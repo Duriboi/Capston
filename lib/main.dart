@@ -691,7 +691,7 @@ class _MainPageState extends State<MainPage> {
   }
 
   Future<void> _uploadImageToServer(File imageFile) async {
-    final uri = Uri.parse("http://192.168.0.9:5000/analyze_prescription");
+    final uri = Uri.parse("http://172.16.175.104:5000/analyze_prescription");
     final request = http.MultipartRequest('POST', uri)
       ..files.add(await http.MultipartFile.fromPath('image', imageFile.path));
 
@@ -820,18 +820,7 @@ class _MainPageState extends State<MainPage> {
                   ],
                 ),
                 SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: days.map((day) {
-                    return Column(
-                      children: [
-                        Text(day, style: TextStyle(fontSize: 16)),
-                        SizedBox(height: 8),
-                        Icon(Icons.check_circle_outline, color: Colors.grey),
-                      ],
-                    );
-                  }).toList(),
-                ),
+
               ],
             ),
           ),
